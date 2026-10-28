@@ -21,7 +21,7 @@ Set `PORT` or `DB_PATH` (default `budget.db`) to override.
 Link banks to import transactions and show balances. Imported spending flows into budgets, Today and Insights like manual entries.
 
 1. Create a Plaid account and copy your keys from <https://dashboard.plaid.com/developers/keys>.
-2. In `server/`, copy `.env.example` to `.env` and fill it in:
+2. Put your settings in `~/.kept/.env` (on Windows `C:\Users\<you>\.kept\.env`, created on first start; override the folder with `KEPT_HOME`). It lives **outside the project** on purpose, so it is never synced by Dropbox or pushed to GitHub, and the database (`~/.kept/budget.db`) is kept there too. `server/.env.example` is the template. Fill it in:
    - `PLAID_CLIENT_ID` and `PLAID_SECRET` (use the **Sandbox** secret while testing)
    - `PLAID_ENV=sandbox` (switch to `production` only after Plaid approves your account)
    - `TOKEN_ENCRYPTION_KEY`: generate with `node -e "console.log(crypto.randomBytes(32).toString('hex'))"`. It encrypts bank tokens in the database; back it up, because losing it means re-linking your banks.
