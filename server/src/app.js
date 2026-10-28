@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import { openDb } from './db.js';
+import { createPlaidClient, createPlaidRouter } from './plaid.js';
+import { localOnly } from './guard.js';
 import { HttpError, str, cents, date, month, oneOf } from './validate.js';
 
 const currentMonth = () => new Date().toISOString().slice(0, 7);
@@ -17,10 +19,20 @@ function needId(req) {
   return id;
 }
 
-export function createApp(db = openDb()) {
+// The API holds bank data, so it only answers requests from this computer: other websites cannot
+// read it (CORS allow-list), and the peer address and Host header are checked (see guard.js).
+
+export function createApp(db = openDb(), options = {}) {
+  const env = options.env ?? process.env;
+  const plaidClient = options.plaidClient !== undefined ? options.plaidClient : createPlaidClient(env);
+  const allowedOrigins = (env.CORS_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173').split(',').map((o) => o.trim());
+  const allowedHosts = (env.ALLOWED_HOSTS || '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
+
   const app = express();
-  app.use(cors());
+  app.use(localOnly({ allowedHosts }));
+  app.use(cors({ origin: allowedOrigins }));
   app.use(express.json());
+  app.use('/api/plaid', createPlaidRouter({ db, client: plaidClient, env }));
 
   // ---- transactions ----
   const txFromBody = (b) => ({

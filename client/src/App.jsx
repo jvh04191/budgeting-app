@@ -13,7 +13,7 @@ const moneyPrecise = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 2,
 })
 
-const CATEGORIES = ['Groceries', 'Dining out', 'Transport', 'Leisure', 'Rent & bills']
+const CATEGORIES = ['Groceries', 'Dining out', 'Transport', 'Leisure', 'Rent & bills', 'Other']
 const ICON_STROKE = 1.75
 
 function formatMoney(cents, precise = false) {
@@ -73,6 +73,7 @@ function Icon({ name, size = 24, className = '' }) {
     receipt: <><path d="M7 3h10v18l-2.5-1.8L12 21l-2.5-1.8L7 21z"/><path d="M10 8h4M10 12h4M10 16h2"/></>,
     backspace: <><path d="M9 7h11v10H9l-5-5z"/><path d="m12 10 4 4m0-4-4 4"/></>,
     plus: <><path d="M12 5v14M5 12h14"/></>,
+    bank: <><path d="M3.5 9.5 12 4l8.5 5.5"/><path d="M5.5 10v7M10 10v7M14 10v7M18.5 10v7M3.5 19.5h17"/></>,
   }
   return <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={ICON_STROKE} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>
 }
@@ -127,8 +128,9 @@ function BudgetRows({ budgets, limit = budgets.length, onSelect }) {
   </div>
 }
 
-function TodayScreen({ data, loading, error, retry, onNavigate, onAdd, onEditBudget }) {
-  const { summary, budgets, transactions, month } = data
+function TodayScreen({ data, loading, error, retry, onNavigate, onAdd, onEditBudget, onOpenAccounts }) {
+  const { summary, budgets, transactions, month, items } = data
+  const linkedAccounts = items.flatMap((item) => item.accounts)
   const totalBudget = budgets.reduce((sum, item) => sum + item.limit_cents, 0)
   const spent = Number(summary?.expense_cents) || 0
   const left = Math.max(0, totalBudget - spent)
@@ -139,7 +141,7 @@ function TodayScreen({ data, loading, error, retry, onNavigate, onAdd, onEditBud
   return <main id="main-content" className="screen today-screen" tabIndex="-1">
     <header className="month-header">
       <h1>{monthLabel(month)}</h1>
-      <button className="icon-button" type="button" aria-label="Settings"><Icon name="settings" /></button>
+      <button className="icon-button" type="button" aria-label="Linked accounts" onClick={onOpenAccounts}><Icon name="settings" /></button>
     </header>
     {error && <ErrorBanner message={error} onRetry={retry} />}
     <section className="hero" aria-labelledby="left-title">
@@ -154,6 +156,11 @@ function TodayScreen({ data, loading, error, retry, onNavigate, onAdd, onEditBud
       <div className="card-heading"><h2 id="today-budgets">Budgets</h2><button className="text-button" type="button" onClick={() => onNavigate('budgets')}>See all</button></div>
       {loading ? <div className="loading-lines" aria-label="Loading budgets"><span/><span/><span/></div> : budgets.length ? <BudgetRows budgets={budgets} limit={3} /> : <EmptyState title="No budgets yet" message="Add a monthly budget to see what is left each day." action="Set a budget" onAction={() => onEditBudget(null)} />}
     </section>
+
+    {linkedAccounts.length > 0 && <section className="card section-card" aria-labelledby="today-accounts">
+      <div className="card-heading"><h2 id="today-accounts">Accounts</h2><button className="text-button" type="button" onClick={onOpenAccounts}>Manage</button></div>
+      <div className="account-list">{linkedAccounts.slice(0, 3).map((account) => <AccountRow key={account.account_id} account={account} />)}</div>
+    </section>}
 
     <section className="card section-card recent-card" aria-labelledby="recent-title">
       <div className="card-heading"><h2 id="recent-title">Recent</h2></div>
@@ -170,7 +177,7 @@ function TransactionRow({ transaction }) {
   const icon = isIncome ? 'income' : /coffee|café/i.test(description) ? 'coffee' : /grocery|food|market/i.test(transaction.category) ? 'cart' : 'receipt'
   return <div className="transaction-row">
     <span className={`transaction-icon ${isIncome ? 'income' : ''}`}><Icon name={icon} size={21} /></span>
-    <div className="transaction-copy"><span className="row-title">{description}</span><span className="transaction-meta">{transaction.category} · {formatTransactionDate(transaction.date)}</span></div>
+    <div className="transaction-copy"><span className="row-title">{description}</span><span className="transaction-meta">{transaction.category} · {formatTransactionDate(transaction.date)}{transaction.pending ? ' · Pending' : ''}</span></div>
     <span className={`transaction-amount ${isIncome ? 'positive' : ''}`}>{formatSigned(transaction.amount_cents, transaction.type)}</span>
   </div>
 }
@@ -374,6 +381,121 @@ function InsightsScreen({ data, loading, error, retry }) {
   </main>
 }
 
+function AccountRow({ account }) {
+  const liability = account.type === 'credit' || account.type === 'loan'
+  const balance = account.current_cents ?? 0
+  const detail = [account.subtype || account.type, account.mask && `•••• ${account.mask}`].filter(Boolean).join(' · ')
+  return <div className="account-row">
+    <span className="transaction-icon"><Icon name="bank" size={21} /></span>
+    <div className="transaction-copy"><span className="row-title">{account.name}</span><span className="transaction-meta">{detail}</span></div>
+    <span className="transaction-amount">{liability && balance > 0 ? '−' : ''}{formatMoney(balance, balance % 100 !== 0)}</span>
+  </div>
+}
+
+let plaidScript = null
+function loadPlaid() {
+  if (window.Plaid) return Promise.resolve(window.Plaid)
+  plaidScript ??= new Promise((resolve, reject) => {
+    const script = document.createElement('script')
+    script.src = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js'
+    script.onload = () => resolve(window.Plaid)
+    script.onerror = () => { plaidScript = null; reject(new Error('Could not load Plaid Link. Check your connection.')) }
+    document.head.append(script)
+  })
+  return plaidScript
+}
+
+function AccountsScreen({ onBack, onChanged }) {
+  const [status, setStatus] = useState(null)
+  const [items, setItems] = useState([])
+  const [busy, setBusy] = useState('')
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  const [confirmId, setConfirmId] = useState(null)
+
+  const refresh = useCallback(async () => {
+    const next = await fetchJson('/api/plaid/status')
+    setStatus(next)
+    if (next.configured) setItems(await fetchJson('/api/plaid/items'))
+  }, [])
+
+  useEffect(() => { refresh().catch((reason) => setError(reason.message)) }, [refresh])
+
+  const run = async (label, task) => {
+    setBusy(label)
+    setError('')
+    setMessage('')
+    try { await task() } catch (reason) { setError(reason.message) } finally { setBusy('') }
+  }
+
+  const sync = () => run('sync', async () => {
+    const result = await sendJson('/api/plaid/sync', 'POST')
+    await refresh()
+    onChanged()
+    if (result.errors.length) throw new Error(`${result.errors[0].institution_name || 'A bank'}: ${result.errors[0].error}`)
+    setMessage(`Imported ${result.added} new and updated ${result.modified} transactions.`)
+  })
+
+  const link = () => run('link', async () => {
+    const [{ link_token }, Plaid] = await Promise.all([sendJson('/api/plaid/link-token', 'POST'), loadPlaid()])
+    await new Promise((resolve, reject) => {
+      const handler = Plaid.create({
+        token: link_token,
+        onSuccess: (publicToken, metadata) => {
+          sendJson('/api/plaid/exchange', 'POST', { public_token: publicToken, institution_name: metadata?.institution?.name || '' })
+            .then(() => sendJson('/api/plaid/sync', 'POST'))
+            .then(resolve, reject)
+        },
+        onExit: (exitError) => (exitError ? reject(new Error(exitError.display_message || exitError.error_message || 'Linking was interrupted.')) : resolve()),
+      })
+      handler.open()
+    })
+    await refresh()
+    onChanged()
+    setMessage('Bank linked. Your transactions are being imported.')
+  })
+
+  const remove = (item) => run('remove', async () => {
+    await sendJson(`/api/plaid/items/${item.id}`, 'DELETE')
+    setConfirmId(null)
+    await refresh()
+    onChanged()
+    setMessage(`${item.institution_name || 'Bank'} was disconnected and its imported transactions were removed. Entries you added yourself were kept.`)
+  })
+
+  const cash = items.flatMap((item) => item.accounts).filter((a) => a.type === 'depository').reduce((sum, a) => sum + (a.current_cents ?? 0), 0)
+
+  return <main id="main-content" className="accounts-screen" tabIndex="-1">
+    <header className="modal-header"><button type="button" className="cancel-button" onClick={onBack}>Done</button><h1>Accounts</h1><span aria-hidden="true" /></header>
+    {error && <div className="error-banner" role="alert"><span>{error}</span></div>}
+    {message && <p className="status-note" role="status">{message}</p>}
+    {!status ? <div className="loading-lines" aria-label="Loading accounts"><span/><span/></div> : !status.configured ? <section className="card section-card">
+      <EmptyState title="Plaid isn’t set up" message="Add PLAID_CLIENT_ID, PLAID_SECRET and TOKEN_ENCRYPTION_KEY to server/.env, then restart the API. See the README for steps." />
+    </section> : <>
+      {items.length > 0 && <section className="hero accounts-hero" aria-labelledby="cash-title">
+        <p id="cash-title" className="eyebrow">Cash in checking and savings</p>
+        <p className="big-stat">{formatMoney(cash, cash % 100 !== 0)}</p>
+      </section>}
+      {items.map((item) => <section className="card section-card" key={item.id} aria-label={item.institution_name || 'Bank'}>
+        <div className="card-heading"><h2>{item.institution_name || 'Bank'}</h2>
+          {confirmId === item.id
+            ? <button className="text-button danger-text" type="button" disabled={Boolean(busy)} onClick={() => remove(item)}>Confirm remove</button>
+            : <button className="text-button danger-text" type="button" disabled={Boolean(busy)} onClick={() => setConfirmId(item.id)} aria-label={`Remove ${item.institution_name || 'bank'}`}>Remove</button>}
+        </div>
+        {confirmId === item.id && <p className="synced-at" role="status">Removing a bank also removes the transactions imported from it. Entries you added yourself stay.</p>}
+        <div className="account-list">{item.accounts.map((account) => <AccountRow key={account.account_id} account={account} />)}</div>
+        {item.last_synced_at && <p className="synced-at">Updated {new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(item.last_synced_at))}</p>}
+      </section>)}
+      {!items.length && <section className="card section-card"><EmptyState title="No banks linked" message="Link a bank to import transactions and see balances automatically." /></section>}
+      <div className="accounts-actions">
+        <button type="button" className="primary-button" onClick={link} disabled={Boolean(busy)}>{busy === 'link' ? 'Opening…' : 'Link a bank'}</button>
+        {items.length > 0 && <button type="button" className="secondary-button" onClick={sync} disabled={Boolean(busy)}>{busy === 'sync' ? 'Syncing…' : 'Sync now'}</button>}
+      </div>
+      <p className="synced-at">Environment: {status.environment}. Bank tokens are encrypted and stay on this computer.</p>
+    </>}
+  </main>
+}
+
 function TabBar({ active, onNavigate, onAdd }) {
   const tabs = [{ id: 'today', label: 'Today', icon: 'today' }, { id: 'budgets', label: 'Budgets', icon: 'budgets' }, { id: 'add', label: 'Add', icon: 'plus' }, { id: 'insights', label: 'Insights', icon: 'insights' }]
   return <nav className="tabbar" aria-label="Main navigation">
@@ -387,11 +509,23 @@ async function fetchJson(path) {
   return response.json()
 }
 
+async function sendJson(path, method, body) {
+  const response = await fetch(path, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  const payload = response.status === 204 ? null : await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(payload?.error || `Request failed (${response.status})`)
+  return payload
+}
+
 function App() {
   const [screen, setScreen] = useState('today')
   const [previousScreen, setPreviousScreen] = useState('today')
   const [editorCategory, setEditorCategory] = useState(null)
-  const [data, setData] = useState({ summary: null, budgets: [], transactions: [], month: currentMonth() })
+  const [data, setData] = useState({ summary: null, budgets: [], transactions: [], month: currentMonth(), items: [] })
+  const autoSynced = useRef(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
@@ -400,12 +534,13 @@ function App() {
     setLoading(true)
     setError('')
     try {
-      const [summary, budgets, transactions] = await Promise.all([
+      const [summary, budgets, transactions, items] = await Promise.all([
         fetchJson(`/api/summary?month=${month}`),
         fetchJson(`/api/budgets?month=${month}`),
         fetchJson(`/api/transactions?month=${month}`),
+        fetchJson('/api/plaid/items').catch(() => []),
       ])
-      setData({ summary, budgets, transactions, month })
+      setData({ summary, budgets, transactions, month, items })
     } catch (reason) {
       setError(`${reason.message}. Check that the API is running on port 3001.`)
     } finally {
@@ -414,6 +549,13 @@ function App() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  // Pull new bank transactions once per page load when a bank is linked.
+  useEffect(() => {
+    if (loading || autoSynced.current) return
+    autoSynced.current = true
+    if (data.items.length) sendJson('/api/plaid/sync', 'POST').then(load).catch(() => {})
+  }, [loading, data.items.length, load])
 
   const navigate = (next) => {
     setScreen(next)
@@ -425,14 +567,17 @@ function App() {
   const openBudgetEditor = (budget) => { setPreviousScreen(screen); setEditorCategory(budget?.category ?? null); navigate('budget-edit') }
   const budgetSaved = async () => { await load(); navigate('budgets') }
 
-  const isModal = screen === 'add' || screen === 'budget-edit'
+  const openAccounts = () => { setPreviousScreen(screen); navigate('accounts') }
+
+  const isModal = screen === 'add' || screen === 'budget-edit' || screen === 'accounts'
 
   const content = useMemo(() => {
     if (screen === 'add') return <AddScreen onCancel={closeAdd} onSaved={saved} />
+    if (screen === 'accounts') return <AccountsScreen onBack={closeAdd} onChanged={load} />
     if (screen === 'budget-edit') return <BudgetEditor budgets={data.budgets} month={data.month} initialCategory={editorCategory} onCancel={closeAdd} onSaved={budgetSaved} />
     if (screen === 'budgets') return <BudgetsScreen data={data} loading={loading} error={error} retry={load} onEditBudget={openBudgetEditor} />
     if (screen === 'insights') return <InsightsScreen data={data} loading={loading} error={error} retry={load} />
-    return <TodayScreen data={data} loading={loading} error={error} retry={load} onNavigate={navigate} onAdd={openAdd} onEditBudget={openBudgetEditor} />
+    return <TodayScreen data={data} loading={loading} error={error} retry={load} onNavigate={navigate} onAdd={openAdd} onEditBudget={openBudgetEditor} onOpenAccounts={openAccounts} />
   }, [screen, data, loading, error, load, previousScreen, editorCategory])
 
   return <div className={`app-shell ${isModal ? 'modal-open' : ''}`}>
